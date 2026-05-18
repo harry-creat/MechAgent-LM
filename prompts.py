@@ -198,3 +198,104 @@ def build_mechanical_rag_prompt(
 
 请使用专业、克制的中文；不要输出与上述四节无关的寒暄或重复【检索上下文】全文。
 """
+
+
+def _format_calc_result(result: dict) -> str:
+    """将计算函数返回的 dict 格式化为可嵌入 Prompt 的文本块。"""
+    lines: list[str] = []
+    calc_type = result.get("calc_type", "机械参数计算")
+    lines.append(f"计算类型: {calc_type}")
+
+    # 输出计算过程
+    process = result.get("process", "")
+    if process:
+        lines.append(f"\n【计算过程】\n{process}")
+
+    # 输出关键结果数值 + 单位
+    lines.append("\n【关键结果】")
+    key_labels = {
+        "max_shear_stress_MPa": ("最大扭转切应力", "MPa"),
+        "max_bending_stress_MPa": ("最大弯曲正应力", "MPa"),
+        "Wp_mm3": ("抗扭截面系数 Wp", "mm³"),
+        "W_mm3": ("抗弯截面系数 W", "mm³"),
+        "safety_factor": ("安全系数 n", "—"),
+        "is_qualified": ("是否合格（n≥1.5）", "—"),
+        "preload_N": ("螺栓预紧力", "N"),
+        "stress_area_mm2": ("应力截面积 As", "mm²"),
+        "pitch_mm": ("螺距 P", "mm"),
+        "suggested_module_mm": ("建议标准模数 m", "mm"),
+        "calculated_module_mm": ("计算模数 m_calc", "mm"),
+        "pitch_diameter_mm": ("分度圆直径 d", "mm"),
+        "L10_hours": ("基本额定寿命 L10h", "小时"),
+        "L10_million_rev": ("额定寿命 L10", "10⁶ 转"),
+        "max_deflection_mm": ("最大挠度 f_max", "mm"),
+        "deflection_ratio": ("挠跨比 f/L", "—"),
+    }
+    for key, (label, unit) in key_labels.items():
+        val = result.get(key)
+        if val is not None:
+            lines.append(f"  {label}: {val} {unit}")
+
+    return "\n".join(lines)
+
+
+def build_calculation_rag_prompt(
+    question: str,
+    calc_result: dict,
+    hits: list[SemanticHit],
+    decision: RouteDecision,
+    *,
+    aux_hits: list[SemanticHit] | None = None,
+) -> str:
+    """五段式参数计算 RAG 提示词模板。
+
+    结构:
+    ① 计算结果摘要（数值 + 单位）
+    ② 工程含义解读
+    ③ 与规范/手册的对比（结合 RAG 检索内容）
+    ④ 安全性评估
+    ⑤ 优化建议
+    """
+    calc_block = _format_calc_result(calc_result)
+    ctx = format_retrieved_context(hits, aux_hits=aux_hits)
+    route_line = (
+        f"自动路由: kb_id={decision.kb_id}, method={decision.method}, "
+        f"reason={decision.reason}; calc_mode=True"
+    )
+
+    return f"""你是一名资深机械工程专家与可靠性工程师，擅长结构强度计算、参数校核与优化设计。
+你正在参与「机械 AI 知识库 / RAG」系统，下方已给出由【参数计算模块】执行的计算结果。
+你的任务是：基于计算结果和【检索上下文】，给出专业的工程解读与建议。
+
+【路由信息】
+{route_line}
+
+【参数计算结果】
+{calc_block}
+
+【检索上下文】
+{ctx}
+
+【用户问题】
+{question}
+
+【输出结构 — 必须严格使用下列标题文字，且按顺序输出】
+
+【① 计算结果摘要】
+（用表格或条列式列出全部计算结果数值与单位；若计算过程中有重要中间量（如截面系数、齿宽系数等）也应一并展示）
+
+【② 工程含义解读】
+（解读计算结果的工程意义：该数值在同类机械设计中处于什么水平、对系统性能有何影响、是否超出常规经验范围）
+
+【③ 与规范/手册的对比】
+（结合上方【检索上下文】中的标准/手册条文，对比计算结果与规范建议值、许用值、推荐范围的差异；若上下文缺乏相关规范数据，须明确说明"检索库未覆盖该规范，建议查阅 GB/ISO 相应标准"）
+
+【④ 安全性评估】
+（基于安全系数/应力水平/寿命等指标，给出安全性结论：合格/裕度不足/需进一步分析；若存在失效风险，列出最可能的失效模式与触发条件）
+
+【⑤ 优化建议】
+（给出可执行的结构/参数优化建议：改什么、为什么改、预期改善幅度；区分短期改进与长期优化方向）
+
+请使用专业、克制的中文；不要输出与上述五节无关的寒暄；不要整段复述【检索上下文】。
+"""
+

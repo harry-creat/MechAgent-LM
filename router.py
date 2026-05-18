@@ -59,6 +59,28 @@ class RouteDecision:
     method: Literal["rules", "llm", "default"]
     # 仿真分析模式：为 True 时强制走 ansys_db 主检索 + 六段式仿真 Prompt（可与 method 并存）
     simulation_mode: bool = False
+    # 参数计算模式：为 True 时触发 calculator 计算 + 五段式计算 Prompt
+    calc_mode: bool = False
+
+
+def is_calculation_query(query: str) -> bool:
+    """检测是否为机械参数计算意图。
+
+    识别关键词：计算、校核、多大、能承受、强度、寿命、挠度、
+    安全系数、扭矩、应力、预紧力、模数。
+    """
+    q = (query or "").strip()
+    if not q:
+        return False
+    keywords = (
+        "计算", "校核", "多大", "能承受",
+        "强度", "寿命", "挠度", "安全系数",
+        "扭矩", "应力", "预紧力", "模数",
+        "切应力", "正应力", "弯曲应力", "扭转",
+        "螺栓预紧", "轴承寿命", "L10",
+        "挠跨比", "分度圆", "接触强度",
+    )
+    return any(kw in q for kw in keywords)
 
 
 def route_query_rules(query: str) -> RouteDecision:
@@ -124,6 +146,14 @@ def route_query_llm(query: str) -> RouteDecision | None:
 
 
 def route_query(query: str, *, use_llm: bool = False) -> RouteDecision:
+    # 参数计算意图优先判断：进入计算模式 + 五段式计算 Prompt
+    calc_on = is_calculation_query(query)
+    if calc_on:
+        decision = route_query_rules(query)
+        decision.calc_mode = True
+        decision.reason = f"参数计算模式（原路由: {decision.reason}）"
+        return decision
+
     # 仿真关键词优先于 LLM 路由：保证进入 ansys_db + 仿真专用 Prompt
     sim_on, sim_hits = detect_simulation_mode(query)
     if sim_on:
