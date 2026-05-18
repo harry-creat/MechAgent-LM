@@ -1,35 +1,29 @@
-from retriever import simple_search
-from deepseek_api import call_deepseek  # 你已有的API封装
-
-def ask_ai(user_question):
-
-    # 1️⃣ 先查知识库
-    knowledge = simple_search(user_question)
-
-    # 2️⃣ 拼接成“增强提示词”
-    context = ""
-
-    if knowledge:
-        context = "以下是机械知识库信息：\n"
-        for k in knowledge:
-            context += str(k) + "\n"
-
-    # 3️⃣ 构造Prompt
-    prompt = f"""
-你是一名机械设计专家，请根据以下资料回答问题：
-
-{context}
-
-用户问题：
-{user_question}
-
-要求：
-- 专业
-- 结构化
-- 尽量结合工程经验
+"""
+问答编排：检索 → 工程级 Prompt → LLM。
 """
 
-    # 4️⃣ 调用大模型
-    response = call_deepseek(prompt)
+from __future__ import annotations
 
-    return response
+from typing import Any
+
+from deepseek_api import call_deepseek
+from prompts import build_mechanical_rag_prompt
+from retriever import retrieve
+
+
+def ask_ai(
+    question: str,
+    *,
+    use_llm_router: bool = False,
+    top_k: int = 5,
+    retrieval_pack: dict[str, Any] | None = None,
+) -> str:
+    """retrieval_pack 由 UI 传入时可避免重复向量检索。"""
+    pack = retrieval_pack or retrieve(question, top_k=top_k, use_llm_router=use_llm_router)
+    prompt = build_mechanical_rag_prompt(
+        question,
+        pack["hits"],
+        pack["decision"],
+        aux_hits=pack.get("aux_hits"),
+    )
+    return call_deepseek(prompt)
