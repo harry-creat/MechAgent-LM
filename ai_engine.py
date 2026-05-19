@@ -12,7 +12,7 @@ import time
 from typing import Any, Generator
 
 from calculator import dispatch_calculation
-from deepseek_api import call_deepseek, stream_deepseek
+from deepseek_api import chat_messages, stream_chat_messages
 from logger import log_error, log_interaction
 from prompts import (
     build_calculation_rag_prompt,
@@ -34,6 +34,28 @@ def _route_label(decision: Any) -> str:
     return f"通用问答 ({decision.kb_id})"
 
 
+_SYSTEM_PROMPT = (
+    "你是一名专业的机械工程设计助手，擅长结构设计、材料选择、参数计算和仿真分析。"
+    "请基于检索到的专业知识回答问题，保持回答的专业性和准确性。"
+    "当用户使用代词（如「它」「这个」「上面提到的」）时，请结合对话历史理解指代对象。"
+)
+
+
+def _build_messages(rag_prompt: str, history: list[dict] | None) -> list[dict[str, str]]:
+    """组装完整的多轮 messages 列表：系统设定 + 历史对话 + 当前 RAG prompt。"""
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+    ]
+    if history:
+        for msg in history[-6:]:  # 最多保留最近 3 轮（6 条）
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"][:500],  # 截断超长历史消息
+            })
+    messages.append({"role": "user", "content": rag_prompt})
+    return messages
+
+
 def ask_ai(
     question: str,
     *,
@@ -42,11 +64,13 @@ def ask_ai(
     retrieval_pack: dict[str, Any] | None = None,
     calc_params: dict[str, Any] | None = None,
     calc_result: dict[str, Any] | None = None,
+    history: list[dict] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """retrieval_pack 由 UI 传入时可避免重复向量检索。
 
     calc_params: 可选计算参数字典，键名见 calculator.py 各函数文档。
     calc_result: 可选，来自前序计算的结果，供推荐模块排序使用。
+    history: 可选，多轮对话历史 [{"role":"user"/"assistant","content":"..."}]
 
     Returns:
         (answer_text, meta_dict)
@@ -83,19 +107,50 @@ def ask_ai(
 
     # --- 参数计算模式 ---
     if getattr(decision, "calc_mode", False):
-        params = calc_params or {}
-        try:
-            result = dispatch_calculation(question, params)
-        except Exception as e:
-            log_error("计算异常", str(e), context=question[:100])
-            result = {"matched": False, "message": f"计算模块异常: {e}"}
+        from param_extractor import (
+            extract_params, identify_calc_type,
+            has_sufficient_params, format_extracted_params,
+        )
+        auto_params = extract_params(question)
+        merged_params = {**auto_params, **(calc_params or {})}
+        calc_type = identify_calc_type(question, merged_params)
+        sufficient, missing = has_sufficient_params(calc_type, merged_params)
+
+        if sufficient:
+            try:
+                result = dispatch_calculation(question, merged_params)
+            except Exception as e:
+                log_error("计算异常", str(e), context=question[:100])
+                result = {"matched": False, "message": f"计算模块异常: {e}"}
+        else:
+            result = {
+                "matched": False,
+                "missing_params": missing,
+                "calc_type": calc_type,
+                "extracted_params": merged_params,
+                "param_summary": format_extracted_params(merged_params, calc_type),
+            }
 
         if result.get("matched"):
             meta["calc_result"] = result
             prompt = build_calculation_rag_prompt(
                 question, result, hits, decision,
             )
-            answer = call_deepseek(prompt)
+            messages = _build_messages(prompt, history)
+            answer = chat_messages(messages)
+            elapsed = time.perf_counter() - t0
+            log_interaction(question, answer, meta["route_label"], elapsed,
+                            calc_result=result)
+            return answer, meta
+
+        # 参数不足：将引导信息注入通用 prompt 降级处理
+        if not sufficient and "missing_params" in result:
+            meta["calc_result"] = result
+            prompt = build_calculation_rag_prompt(
+                question, result, hits, decision,
+            )
+            messages = _build_messages(prompt, history)
+            answer = chat_messages(messages)
             elapsed = time.perf_counter() - t0
             log_interaction(question, answer, meta["route_label"], elapsed,
                             calc_result=result)
@@ -115,7 +170,8 @@ def ask_ai(
             prompt = build_recommendation_prompt(
                 question, recs, rec_text, hits, decision,
             )
-            answer = call_deepseek(prompt)
+            messages = _build_messages(prompt, history)
+            answer = chat_messages(messages)
             elapsed = time.perf_counter() - t0
             log_interaction(question, answer, meta["route_label"], elapsed,
                             recommendations=recs)
@@ -128,7 +184,8 @@ def ask_ai(
         decision,
         aux_hits=pack.get("aux_hits"),
     )
-    answer = call_deepseek(prompt)
+    messages = _build_messages(prompt, history)
+    answer = chat_messages(messages)
     elapsed = time.perf_counter() - t0
     log_interaction(question, answer, meta["route_label"], elapsed)
     return answer, meta
@@ -142,9 +199,12 @@ def ask_ai_stream(
     retrieval_pack: dict[str, Any] | None = None,
     calc_params: dict[str, Any] | None = None,
     calc_result: dict[str, Any] | None = None,
+    history: list[dict] | None = None,
 ) -> tuple["Generator[str, None, None]", dict[str, Any]]:
     """流式版本的 ask_ai，路由/检索/Prompt 逻辑与 ask_ai() 完全相同，
-    仅最后使用 stream_deepseek() 替代 call_deepseek() 以逐块返回文本。
+    仅最后使用 stream_chat_messages() 替代 chat_messages() 以逐块返回文本。
+
+    history: 可选，多轮对话历史 [{"role":"user"/"assistant","content":"..."}]
 
     Returns:
         (chunk_generator, meta_dict)
@@ -183,13 +243,32 @@ def ask_ai_stream(
     final_prompt: str | None = None
 
     if getattr(decision, "calc_mode", False):
-        params = calc_params or {}
-        try:
-            result = dispatch_calculation(question, params)
-        except Exception as e:
-            log_error("计算异常", str(e), context=question[:100])
-            result = {"matched": False, "message": f"计算模块异常: {e}"}
+        from param_extractor import (
+            extract_params, identify_calc_type,
+            has_sufficient_params,
+        )
+        auto_params = extract_params(question)
+        merged_params = {**auto_params, **(calc_params or {})}
+        calc_type = identify_calc_type(question, merged_params)
+        sufficient, missing = has_sufficient_params(calc_type, merged_params)
+
+        if sufficient:
+            try:
+                result = dispatch_calculation(question, merged_params)
+            except Exception as e:
+                log_error("计算异常", str(e), context=question[:100])
+                result = {"matched": False, "message": f"计算模块异常: {e}"}
+        else:
+            result = {
+                "matched": False,
+                "missing_params": missing,
+                "calc_type": calc_type,
+                "extracted_params": merged_params,
+            }
         if result.get("matched"):
+            meta["calc_result"] = result
+            final_prompt = build_calculation_rag_prompt(question, result, hits, decision)
+        elif "missing_params" in result:
             meta["calc_result"] = result
             final_prompt = build_calculation_rag_prompt(question, result, hits, decision)
 
@@ -210,9 +289,11 @@ def ask_ai_stream(
         )
 
     # 构建流式生成器
+    messages = _build_messages(final_prompt, history)
+
     def _stream():
         full = ""
-        for chunk in stream_deepseek(final_prompt):
+        for chunk in stream_chat_messages(messages):
             full += chunk
             yield chunk
         elapsed = time.perf_counter() - t0

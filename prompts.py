@@ -263,10 +263,25 @@ def build_calculation_rag_prompt(
         f"reason={decision.reason}; calc_mode=True"
     )
 
+    # 参数不足时的引导语
+    missing_hint = ""
+    missing_params = calc_result.get("missing_params")
+    if missing_params:
+        calc_type = calc_result.get("calc_type", "未知")
+        missing_str = "、".join(missing_params)
+        extracted = calc_result.get("extracted_params", {})
+        param_summary = calc_result.get("param_summary", "")
+        missing_hint = (
+            f"\n【⚠️ 参数不足提示】\n"
+            f"用户想进行「{calc_type}」计算，已识别到的参数：{param_summary}\n"
+            f"缺少以下参数：{missing_str}。\n"
+            f"请在回答中友好地引导用户提供这些缺失参数，同时基于知识库和机械工程经验给出估算范围参考。\n"
+        )
+
     return f"""你是一名资深机械工程专家与可靠性工程师，擅长结构强度计算、参数校核与优化设计。
 你正在参与「机械 AI 知识库 / RAG」系统，下方已给出由【参数计算模块】执行的计算结果。
 你的任务是：基于计算结果和【检索上下文】，给出专业的工程解读与建议。
-
+{missing_hint}
 【路由信息】
 {route_line}
 

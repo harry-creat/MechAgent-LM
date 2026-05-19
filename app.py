@@ -64,6 +64,15 @@ if "last_meta" not in st.session_state:
     st.session_state.last_meta = {}
 if "health_report" not in st.session_state:
     st.session_state.health_report = run_health_check()
+if "context_rounds" not in st.session_state:
+    st.session_state.context_rounds = 3
+
+
+def get_recent_history(n_rounds: int = 3) -> list[dict]:
+    """从 session_state 提取最近 N 轮对话历史。"""
+    messages = st.session_state.get("messages", [])
+    history = messages[:-1] if messages else []  # 排除最后一条（当前问题）
+    return history[-(n_rounds * 2):]  # 每轮含 user + assistant
 
 # ======================
 # 左侧控制栏
@@ -115,6 +124,19 @@ with st.sidebar:
         st.metric("推荐", s["recommend"])
     with col4:
         st.metric("当前路由", st.session_state.last_route[:6] + "…" if len(st.session_state.last_route) > 6 else st.session_state.last_route)
+
+    st.markdown("---")
+
+    # ── 上下文记忆 ──
+    st.markdown("**🧠 上下文记忆**")
+    n_rounds = st.slider(
+        "携带历史轮数",
+        min_value=0,
+        max_value=5,
+        value=st.session_state.get("context_rounds", 3),
+        help="0 = 每次独立问答；数字越大记忆越长，但响应略慢",
+    )
+    st.session_state["context_rounds"] = n_rounds
 
     st.markdown("---")
 
@@ -322,7 +344,8 @@ if final_input:
 
     # 2️⃣ 调用 AI（流式）
     try:
-        stream_gen, meta = ask_ai_stream(final_input)
+        n_rounds = st.session_state.get("context_rounds", 3)
+        stream_gen, meta = ask_ai_stream(final_input, history=get_recent_history(n_rounds))
     except Exception as e:
         answer = f"系统处理异常，请稍后重试。错误信息: {e}"
         meta = {"route_label": "异常", "calc_result": None, "recommendations": None, "has_hits": False}

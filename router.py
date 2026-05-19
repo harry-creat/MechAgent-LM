@@ -70,6 +70,7 @@ def is_calculation_query(query: str) -> bool:
 
     识别关键词：计算、校核、多大、能承受、强度、寿命、挠度、
     安全系数、扭矩、应力、预紧力、模数。
+    同时检测：含有数值 + 单位（mm/MPa/Nm/rpm/kN）的组合也视为计算意图。
     """
     q = (query or "").strip()
     if not q:
@@ -82,7 +83,13 @@ def is_calculation_query(query: str) -> bool:
         "螺栓预紧", "轴承寿命", "L10",
         "挠跨比", "分度圆", "接触强度",
     )
-    return any(kw in q for kw in keywords)
+    if any(kw in q for kw in keywords):
+        return True
+    # 数值 + 单位组合检测
+    if re.search(r"\d+\.?\d*\s*(?:mm|cm|m\b|MPa|GPa|Nm|kN|rpm|r/min|kW)", q):
+        if re.search(r"(?:直径|轴径|扭矩|载荷|力|转速|应力|强度|模数|寿命|挠度|弹性模量|惯性矩|齿数|螺栓)", q):
+            return True
+    return False
 
 
 def is_recommendation_query(query: str) -> bool:
