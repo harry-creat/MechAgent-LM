@@ -8,6 +8,7 @@
 - **参数计算** — 7 种常用机械设计参数自动计算（轴应力、安全系数、螺栓预紧力、齿轮模数、轴承寿命、梁挠度）
 - **结构推荐** — 覆盖 5 大设计场景（轴系/齿轮/联接/轴承/密封），18 种方案的智能推荐
 - **仿真分析** — CAE/FEA 仿真问题专用六段式工程 Prompt，支持 ANSYS/Abaqus/COMSOL 语境
+- **游客模式** — 无需登录直接使用，对话记录本地保存
 
 ## 环境要求
 
@@ -75,7 +76,7 @@ streamlit run app.py
 
 ```
 ai-mechanical-assistant/
-├── app.py                 # Streamlit 前端界面
+├── app.py                 # Streamlit 前端界面（ChatGPT 风格深色 UI）
 ├── ai_engine.py           # 核心编排逻辑（路由 → 检索 → Prompt → LLM）
 ├── router.py              # 问题路由（calc / recommend / simulation / 四库）
 ├── prompts.py             # Prompt 模板（通用/仿真/计算/推荐 四种）
@@ -94,6 +95,7 @@ ai-mechanical-assistant/
 ├── pdf_loader.py          # PDF 文档加载（PyMuPDF）
 ├── splitter.py            # 文本分割（LangChain）
 ├── build_kb.py            # 知识库构建入口
+├── PROJECT_STRUCTURE.md   # 项目框架详细文档
 ├── requirements.txt       # Python 依赖列表
 ├── faiss_db/              # FAISS 索引持久化目录
 ├── logs/                  # 对话日志与错误日志
@@ -160,7 +162,10 @@ ai-mechanical-assistant/
 ### Q2: 知识库显示"空库"怎么办？
 运行 `python build_kb.py` 构建知识库索引。确保 `knowledge_base/` 目录下有对应的 Markdown 文件，或修改 `config_kb.py` 中的 `MD_SOURCES` 配置。
 
-### Q3: 参数计算提示"缺少参数"？
+### Q3: 游客模式和注册用户的区别？
+游客模式可直接使用所有问答、计算、推荐功能，无需登录。但对话记录仅保存在本地会话中，关闭浏览器后消失。如需长期保存对话历史，可使用邮箱密码注册登录（需配置 Firebase，详见 PROJECT_STRUCTURE.md 扩展方向部分）。
+
+### Q4: 参数计算提示"缺少参数"？
 计算功能需要提供具体的数值参数。可通过聊天界面直接描述参数（如 "扭矩500Nm，直径40mm"），系统会尝试识别。目前参数提取依赖 `calc_params` 字典传参，后续版本将支持自然语言参数提取。
 
 ### Q4: 如何切换 Embedding 模型？
