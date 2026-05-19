@@ -1,5 +1,5 @@
 import streamlit as st
-from ai_engine import ask_ai
+from ai_engine import ask_ai_stream
 from health_check import run_health_check, format_health_report
 from logger import export_session_report
 
@@ -320,15 +320,30 @@ if final_input:
         "type": "qa",
     })
 
-    # 2️⃣ 调用AI
-    with st.spinner("正在分析..."):
-        try:
-            answer, meta = ask_ai(final_input)
-        except Exception as e:
-            answer = f"系统处理异常，请稍后重试。错误信息: {e}"
-            meta = {"route_label": "异常", "calc_result": None, "recommendations": None, "has_hits": False}
-            from logger import log_error
-            log_error("ask_ai异常", str(e), context=final_input[:100])
+    # 2️⃣ 调用 AI（流式）
+    try:
+        stream_gen, meta = ask_ai_stream(final_input)
+    except Exception as e:
+        answer = f"系统处理异常，请稍后重试。错误信息: {e}"
+        meta = {"route_label": "异常", "calc_result": None, "recommendations": None, "has_hits": False}
+        from logger import log_error
+        log_error("ask_ai异常", str(e), context=final_input[:100])
+        # 非流式降级
+        st.session_state.messages.append({
+            "role": "assistant", "content": answer, "type": "qa",
+            "route_info": "异常", "calc_meta": None, "rec_meta": None,
+        })
+        st.session_state.stats["total"] += 1
+        st.rerun()
+    else:
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            full_response = ""
+            for chunk in stream_gen:
+                full_response += chunk
+                placeholder.markdown(full_response + "▌")
+            placeholder.markdown(full_response)
+            answer = full_response
 
     # 3️⃣ 确定消息类型
     route_label = meta.get("route_label", "")

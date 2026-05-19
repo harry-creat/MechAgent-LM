@@ -9,10 +9,10 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Generator
 
 from calculator import dispatch_calculation
-from deepseek_api import call_deepseek
+from deepseek_api import call_deepseek, stream_deepseek
 from logger import log_error, log_interaction
 from prompts import (
     build_calculation_rag_prompt,
@@ -132,3 +132,92 @@ def ask_ai(
     elapsed = time.perf_counter() - t0
     log_interaction(question, answer, meta["route_label"], elapsed)
     return answer, meta
+
+
+def ask_ai_stream(
+    question: str,
+    *,
+    use_llm_router: bool = False,
+    top_k: int = 5,
+    retrieval_pack: dict[str, Any] | None = None,
+    calc_params: dict[str, Any] | None = None,
+    calc_result: dict[str, Any] | None = None,
+) -> tuple["Generator[str, None, None]", dict[str, Any]]:
+    """流式版本的 ask_ai，路由/检索/Prompt 逻辑与 ask_ai() 完全相同，
+    仅最后使用 stream_deepseek() 替代 call_deepseek() 以逐块返回文本。
+
+    Returns:
+        (chunk_generator, meta_dict)
+        - chunk_generator: 逐块 yield 文本增量的生成器
+        - meta_dict: 路由标签、计算结果、推荐结果等元数据（在流式之前已确定）
+    """
+    t0 = time.perf_counter()
+    meta: dict[str, Any] = {
+        "route_label": "通用问答",
+        "calc_result": None,
+        "recommendations": None,
+        "has_hits": True,
+    }
+
+    try:
+        pack = retrieval_pack or retrieve(question, top_k=top_k, use_llm_router=use_llm_router)
+    except Exception as e:
+        log_error("检索失败", str(e), context=question[:100])
+        meta["has_hits"] = False
+        from router import RouteDecision
+        from config_kb import KB_STRUCTURE
+        pack = {
+            "decision": RouteDecision(KB_STRUCTURE, "检索异常回退", "default"),
+            "hits": [],
+            "aux_hits": [],
+        }
+
+    decision = pack["decision"]
+    hits = pack.get("hits", [])
+    meta["route_label"] = _route_label(decision)
+
+    if not hits:
+        meta["has_hits"] = False
+
+    # 确定最终 Prompt（与 ask_ai 相同的路由逻辑）
+    final_prompt: str | None = None
+
+    if getattr(decision, "calc_mode", False):
+        params = calc_params or {}
+        try:
+            result = dispatch_calculation(question, params)
+        except Exception as e:
+            log_error("计算异常", str(e), context=question[:100])
+            result = {"matched": False, "message": f"计算模块异常: {e}"}
+        if result.get("matched"):
+            meta["calc_result"] = result
+            final_prompt = build_calculation_rag_prompt(question, result, hits, decision)
+
+    if final_prompt is None and getattr(decision, "recommend_mode", False):
+        try:
+            recs = recommend_structure(question, calc_result=calc_result)
+        except Exception as e:
+            log_error("推荐异常", str(e), context=question[:100])
+            recs = []
+        if recs:
+            meta["recommendations"] = recs
+            rec_text = format_recommendation(recs)
+            final_prompt = build_recommendation_prompt(question, recs, rec_text, hits, decision)
+
+    if final_prompt is None:
+        final_prompt = build_mechanical_rag_prompt(
+            question, hits, decision, aux_hits=pack.get("aux_hits"),
+        )
+
+    # 构建流式生成器
+    def _stream():
+        full = ""
+        for chunk in stream_deepseek(final_prompt):
+            full += chunk
+            yield chunk
+        elapsed = time.perf_counter() - t0
+        log_interaction(question, full, meta["route_label"], elapsed,
+                        calc_result=meta.get("calc_result"),
+                        recommendations=meta.get("recommendations"))
+
+    return _stream(), meta

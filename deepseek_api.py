@@ -8,7 +8,7 @@ API Key 从环境变量读取，避免密钥进入版本库。
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Generator
 
 import requests
 
@@ -77,3 +77,73 @@ def call_deepseek(prompt: str) -> str:
     except RuntimeError as e:
         log_error("API密钥缺失", str(e))
         return str(e)
+
+
+def _stream_post(payload: dict) -> "Generator[str, None, None]":
+    """流式 POST 请求的内部实现，逐行 yield SSE 数据中的文本增量。"""
+    import json as _json
+
+    try:
+        response = requests.post(
+            API_URL,
+            headers=_headers(),
+            json=payload,
+            stream=True,
+            timeout=(10, 60),
+        )
+        response.raise_for_status()
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+            line = line.decode("utf-8")
+            if line.startswith("data: "):
+                data_str = line[6:]
+                if data_str.strip() == "[DONE]":
+                    return
+                try:
+                    chunk = _json.loads(data_str)
+                    delta = chunk["choices"][0]["delta"].get("content", "")
+                    if delta:
+                        yield delta
+                except (_json.JSONDecodeError, KeyError, IndexError):
+                    continue
+    except requests.exceptions.Timeout:
+        yield "\n\n⚠️ AI 服务响应超时，请稍后重试"
+    except requests.exceptions.ConnectionError:
+        yield "\n\n⚠️ 网络连接失败，请检查网络和代理设置"
+    except Exception as e:
+        log_error("流式API异常", str(e))
+        yield f"\n\n⚠️ AI 服务异常: {str(e)[:80]}"
+
+
+def stream_deepseek(prompt: str) -> "Generator[str, None, None]":
+    """流式调用 DeepSeek API，逐块 yield 文本增量。
+
+    用法:
+        for chunk in stream_deepseek(prompt):
+            full_text += chunk
+            render(full_text)
+    """
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+        "temperature": 0.3,
+        "max_tokens": 4096,
+    }
+    yield from _stream_post(payload)
+
+
+def stream_chat_messages(messages: list[dict]) -> "Generator[str, None, None]":
+    """多轮对话流式版本，messages 格式同 OpenAI：
+    [{"role": "user/assistant/system", "content": "..."}]
+    """
+    payload = {
+        "model": "deepseek-chat",
+        "messages": messages,
+        "stream": True,
+        "temperature": 0.3,
+        "max_tokens": 4096,
+    }
+    yield from _stream_post(payload)
