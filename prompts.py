@@ -299,3 +299,80 @@ def build_calculation_rag_prompt(
 请使用专业、克制的中文；不要输出与上述五节无关的寒暄；不要整段复述【检索上下文】。
 """
 
+
+def build_recommendation_prompt(
+    question: str,
+    recommendations: list[dict],
+    rec_formatted: str,
+    hits: list[SemanticHit],
+    decision: RouteDecision,
+    *,
+    aux_hits: list[SemanticHit] | None = None,
+) -> str:
+    """六段式结构推荐 RAG 提示词模板。
+
+    结构:
+    ① 需求理解
+    ② 推荐方案对比表
+    ③ 首选方案详细说明
+    ④ 参数选取建议
+    ⑤ 需进一步确认的设计参数
+    ⑥ 相关标准与参考资料
+    """
+    ctx = format_retrieved_context(hits, aux_hits=aux_hits)
+    route_line = (
+        f"自动路由: kb_id={decision.kb_id}, method={decision.method}, "
+        f"reason={decision.reason}; recommend_mode=True"
+    )
+
+    # 构建方案列表摘要供 LLM 生成对比表
+    scheme_summaries: list[str] = []
+    for i, rec in enumerate(recommendations, 1):
+        name = rec.get("name", "未知")
+        desc = rec.get("description", "")
+        advs = "；".join(rec.get("advantages", [])[:3])
+        scheme_summaries.append(f"{i}. {name}: {desc} 主要优点: {advs}")
+    scheme_brief = "\n".join(scheme_summaries)
+
+    return f"""你是一名资深机械设计专家与方案评审工程师，擅长机械结构方案论证与选型决策。
+你正在参与「机械 AI 知识库 / RAG」系统，下方已给出由【结构推荐模块】生成的候选方案及检索上下文。
+你的任务是：基于候选方案和检索上下文，给出专业的设计方案评审与选型建议。
+
+【路由信息】
+{route_line}
+
+【候选方案摘要】
+{scheme_brief}
+
+【方案详细数据（来自知识库）】
+{rec_formatted}
+
+【检索上下文（来自向量检索）】
+{ctx}
+
+【用户问题】
+{question}
+
+【输出结构 — 必须严格使用下列标题文字，且按顺序输出】
+
+【① 需求理解】
+（用 3~5 句复述用户的设计需求和关键约束条件：载荷类型、转速范围、空间限制、成本敏感度、可靠性要求等。若有未明确的约束请在此指出。）
+
+【② 推荐方案对比表】
+（用 Markdown 表格列出全部候选方案，至少包含列：方案名称 | 适用场景 | 主要优点 | 主要缺点 | 典型参数范围。每行列出一个方案。）
+
+【③ 首选方案详细说明】
+（说明首选方案的理由，从承载能力、工艺性、成本、可靠性、标准化程度等多维度论证。解释为什么首选方案优于其他候选方案。）
+
+【④ 参数选取建议】
+（基于方案的典型参数范围和用户的可能工况，给出关键参数的选取建议和取值区间。若用户问题中包含了具体载荷/转速等数据，请结合这些数据给出针对性建议。）
+
+【⑤ 需进一步确认的设计参数】
+（列出系统推荐方案时依赖但用户尚未提供的设计输入：如确切载荷谱、材料牌号、使用环境温度、安装空间尺寸、期望寿命等。以提问形式引导用户补充信息。）
+
+【⑥ 相关标准与参考资料】
+（列出候选方案涉及的主要 GB/ISO 标准编号和名称，说明其在设计中的应用范围。若检索上下文中有相关案例或条文，请引用并说明。）
+
+请使用专业、克制的中文；不要输出与上述六节无关的寒暄；不要整段复述【方案详细数据】和【检索上下文】。
+"""
+

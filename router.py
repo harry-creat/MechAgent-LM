@@ -61,6 +61,8 @@ class RouteDecision:
     simulation_mode: bool = False
     # 参数计算模式：为 True 时触发 calculator 计算 + 五段式计算 Prompt
     calc_mode: bool = False
+    # 结构推荐模式：为 True 时触发 recommender 推荐 + 六段式推荐 Prompt
+    recommend_mode: bool = False
 
 
 def is_calculation_query(query: str) -> bool:
@@ -79,6 +81,24 @@ def is_calculation_query(query: str) -> bool:
         "切应力", "正应力", "弯曲应力", "扭转",
         "螺栓预紧", "轴承寿命", "L10",
         "挠跨比", "分度圆", "接触强度",
+    )
+    return any(kw in q for kw in keywords)
+
+
+def is_recommendation_query(query: str) -> bool:
+    """检测是否为结构方案推荐意图。
+
+    识别关键词：推荐、选型、方案、哪种、怎么选、适合、
+    比较、优缺点、结构形式。
+    """
+    q = (query or "").strip()
+    if not q:
+        return False
+    keywords = (
+        "推荐", "选型", "方案", "哪种", "怎么选",
+        "适合", "比较", "优缺点", "结构形式",
+        "选用", "选择哪种", "哪个好", "什么结构",
+        "怎么设计", "如何选取", "形式选择",
     )
     return any(kw in q for kw in keywords)
 
@@ -146,7 +166,9 @@ def route_query_llm(query: str) -> RouteDecision | None:
 
 
 def route_query(query: str, *, use_llm: bool = False) -> RouteDecision:
-    # 参数计算意图优先判断：进入计算模式 + 五段式计算 Prompt
+    # 优先级: calc > recommend > simulation > 四库路由
+
+    # 1) 参数计算意图优先判断
     calc_on = is_calculation_query(query)
     if calc_on:
         decision = route_query_rules(query)
@@ -154,7 +176,15 @@ def route_query(query: str, *, use_llm: bool = False) -> RouteDecision:
         decision.reason = f"参数计算模式（原路由: {decision.reason}）"
         return decision
 
-    # 仿真关键词优先于 LLM 路由：保证进入 ansys_db + 仿真专用 Prompt
+    # 2) 结构推荐意图
+    rec_on = is_recommendation_query(query)
+    if rec_on:
+        decision = route_query_rules(query)
+        decision.recommend_mode = True
+        decision.reason = f"结构推荐模式（原路由: {decision.reason}）"
+        return decision
+
+    # 3) 仿真分析模式
     sim_on, sim_hits = detect_simulation_mode(query)
     if sim_on:
         return RouteDecision(
