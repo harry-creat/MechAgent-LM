@@ -1,5 +1,7 @@
 import streamlit as st
 from ai_engine import ask_ai
+from health_check import run_health_check, format_health_report
+from logger import export_session_report
 
 # ======================
 # 引导性问题模板
@@ -37,21 +39,82 @@ _GUIDED_TEMPLATES = {
     ),
 }
 
+_QUICK_QUESTIONS = [
+    "如何选择轴的材料？",
+    "计算直径40mm轴能承受的最大扭矩",
+    "推荐一种适合重载的齿轮传动方案",
+    "ANSYS静力学分析步骤",
+]
+
 # ======================
 # 页面配置
 # ======================
 st.set_page_config(page_title="机械AI助手", layout="wide")
 
 # ======================
+# 初始化 session_state
+# ======================
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "stats" not in st.session_state:
+    st.session_state.stats = {"total": 0, "calc": 0, "recommend": 0}
+if "last_route" not in st.session_state:
+    st.session_state.last_route = "—"
+if "last_meta" not in st.session_state:
+    st.session_state.last_meta = {}
+if "health_report" not in st.session_state:
+    st.session_state.health_report = run_health_check()
+
+# ======================
 # 左侧控制栏
 # ======================
 with st.sidebar:
-    st.title("⚙️ 机械AI控制台")
+    st.title("机械AI控制台")
 
-    mode = st.selectbox(
-        "选择知识领域",
-        ["通用机械", "材料分析", "结构设计", "支撑系统"]
+    # ── 系统自检状态 ──
+    report = st.session_state.health_report
+    all_ok = report.all_ok
+    st.markdown(
+        f"### {'✅' if all_ok else '⚠️'} 系统状态: "
+        f"{'正常' if all_ok else f'{report.failed}项异常'}"
     )
+    with st.expander("查看详情"):
+        for item in report.items:
+            st.caption(f"{item.icon} {item.name}: {item.detail}")
+
+    st.markdown("---")
+
+    # ── 知识库状态 ──
+    st.subheader("知识库状态")
+    try:
+        from config_kb import ALL_KB_IDS
+        from vector_store import VectorStore
+        vs = VectorStore()
+        for kb_id in ALL_KB_IDS:
+            idx = vs._get_index(kb_id)
+            count = idx.count
+            if count > 0:
+                st.caption(f"📗 {kb_id}: {count} 条")
+            else:
+                st.caption(f"📭 {kb_id}: 空库")
+    except Exception:
+        st.caption("知识库状态暂不可用")
+
+    st.markdown("---")
+
+    # ── 对话统计 ──
+    st.subheader("本次对话统计")
+    s = st.session_state.stats
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("提问", s["total"])
+    with col2:
+        st.metric("计算", s["calc"])
+    col3, col4 = st.columns(2)
+    with col3:
+        st.metric("推荐", s["recommend"])
+    with col4:
+        st.metric("当前路由", st.session_state.last_route[:6] + "…" if len(st.session_state.last_route) > 6 else st.session_state.last_route)
 
     st.markdown("---")
 
@@ -79,25 +142,132 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
-    st.info("💡 提示：本系统已接入机械知识库 + DeepSeek")
 
-# ======================
-# 初始化聊天记录
-# ======================
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    # ── 导出报告 ──
+    st.subheader("会话管理")
+    if st.button("导出本次报告", use_container_width=True):
+        report_md = export_session_report(st.session_state.messages)
+        st.download_button(
+            label="下载 Markdown 报告",
+            data=report_md,
+            file_name=f"mechanical_ai_report_{__import__('time').strftime('%Y%m%d_%H%M')}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+
+    if st.button("清空对话", use_container_width=True, type="secondary"):
+        st.session_state.messages = []
+        st.session_state.stats = {"total": 0, "calc": 0, "recommend": 0}
+        st.session_state.last_route = "—"
+        st.session_state.last_meta = {}
+        st.rerun()
+
+    st.markdown("---")
+
+    # ── 文件上传 ──
+    st.subheader("上传设计需求")
+    uploaded_file = st.file_uploader(
+        "支持 .txt 格式",
+        type=["txt"],
+        label_visibility="collapsed",
+    )
+    if uploaded_file is not None:
+        try:
+            content = uploaded_file.read().decode("utf-8")
+            st.session_state["guided_template"] = content
+            st.success(f"已读取文件: {uploaded_file.name} ({len(content)} 字符)")
+        except Exception as e:
+            st.error(f"文件读取失败: {e}")
 
 # ======================
 # 页面标题
 # ======================
-st.title("🤖 基于Deepseek的机械工程助手")
+st.title("基于Deepseek的机械工程助手")
 
 # ======================
-# 显示历史消息
+# 显示历史消息（带增强卡片）
 # ======================
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
+for i, msg in enumerate(st.session_state.messages):
+    role = msg["role"]
+    msg_type = msg.get("type", "qa")
+
+    if role == "user":
+        with st.chat_message("user"):
+            st.write(msg["content"])
+    else:
+        # 根据消息类型选择图标
+        icon_map = {"calc": "📐", "recommend": "🔧", "qa": "🤖"}
+        icon = icon_map.get(msg_type, "🤖")
+
+        with st.chat_message("assistant", avatar=icon):
+            # 计算模式：展示关键数值卡片
+            if msg_type == "calc" and msg.get("calc_meta"):
+                calc_meta = msg["calc_meta"]
+                calc_data = {}
+                for key, label in [
+                    ("max_shear_stress_MPa", "切应力"),
+                    ("max_bending_stress_MPa", "弯曲应力"),
+                    ("safety_factor", "安全系数"),
+                    ("preload_N", "预紧力"),
+                    ("suggested_module_mm", "建议模数"),
+                    ("L10_hours", "轴承寿命"),
+                    ("max_deflection_mm", "最大挠度"),
+                ]:
+                    val = calc_meta.get(key)
+                    if val is not None:
+                        suffix = ""
+                        if key == "max_shear_stress_MPa":
+                            suffix = " MPa"
+                        elif key == "max_bending_stress_MPa":
+                            suffix = " MPa"
+                        elif key == "preload_N":
+                            suffix = " N"
+                        elif key == "suggested_module_mm":
+                            suffix = " mm"
+                        elif key == "L10_hours":
+                            suffix = " h"
+                        elif key == "max_deflection_mm":
+                            suffix = " mm"
+                        calc_data[label] = f"{val}{suffix}"
+                if calc_data:
+                    cols = st.columns(len(calc_data))
+                    for ci, (label, val_str) in enumerate(calc_data.items()):
+                        with cols[ci]:
+                            st.metric(label, val_str)
+
+            # 推荐模式：expander 展示方案
+            if msg_type == "recommend" and msg.get("rec_meta"):
+                recs = msg["rec_meta"]
+                if recs:
+                    with st.expander("查看推荐方案详情"):
+                        for ri, rec in enumerate(recs, 1):
+                            name = rec.get("name", f"方案{ri}")
+                            score = rec.get("match_score", 0)
+                            st.markdown(f"**{ri}. {name}** （匹配度: {score}）")
+                            st.caption(f"场景: {rec.get('description', '')}")
+                            col_adv, col_dis = st.columns(2)
+                            with col_adv:
+                                st.markdown("**优点**")
+                                for a in rec.get("advantages", [])[:4]:
+                                    st.caption(f"+ {a}")
+                            with col_dis:
+                                st.markdown("**缺点**")
+                                for d in rec.get("disadvantages", [])[:4]:
+                                    st.caption(f"- {d}")
+                            with st.expander("参数范围 & 标准"):
+                                for pk, pv in rec.get("typical_params", {}).items():
+                                    st.caption(f"· {pk}: {pv}")
+                                for std in rec.get("related_standards", []):
+                                    st.caption(f"📋 {std}")
+                            st.markdown("---")
+
+            # AI 回复正文
+            st.write(msg["content"])
+
+            # 路由信息
+            route_info = msg.get("route_info", "")
+            if route_info:
+                st.caption(f"路由: {route_info}")
 
 # ======================
 # 用户输入区
@@ -105,7 +275,6 @@ for msg in st.session_state.messages:
 guided = st.session_state.get("guided_template", None)
 
 if guided:
-    # 引导模板模式：显示可编辑文本框 + 发送按钮
     with st.chat_message("user"):
         edited = st.text_area(
             "编辑您的问题（可修改模板中的参数后再发送）：",
@@ -120,17 +289,26 @@ else:
     edited = None
     send_clicked = False
 
-# 正常 chat_input（始终显示，即使有引导模板）
 user_input = st.chat_input("请输入机械设计/材料/结构问题...")
+
+# ── 快捷问题标签 ──
+st.caption("快捷提问：")
+cols_quick = st.columns(len(_QUICK_QUESTIONS))
+quick_clicked = None
+for ci, qq in enumerate(_QUICK_QUESTIONS):
+    with cols_quick[ci]:
+        if st.button(qq, key=f"quick_{ci}", use_container_width=True):
+            quick_clicked = qq
 
 # ======================
 # 核心逻辑
 # ======================
-# 确定最终的用户输入（优先级：引导发送 > chat_input）
 final_input: str | None = None
 if guided and send_clicked and edited:
     final_input = edited.strip()
-    st.session_state.pop("guided_template", None)  # 清除模板
+    st.session_state.pop("guided_template", None)
+elif quick_clicked:
+    final_input = quick_clicked
 elif user_input:
     final_input = user_input.strip()
 
@@ -138,17 +316,53 @@ if final_input:
     # 1️⃣ 存用户消息
     st.session_state.messages.append({
         "role": "user",
-        "content": final_input
+        "content": final_input,
+        "type": "qa",
     })
 
     # 2️⃣ 调用AI
     with st.spinner("正在分析..."):
-        answer = ask_ai(final_input)
+        try:
+            answer, meta = ask_ai(final_input)
+        except Exception as e:
+            answer = f"系统处理异常，请稍后重试。错误信息: {e}"
+            meta = {"route_label": "异常", "calc_result": None, "recommendations": None, "has_hits": False}
+            from logger import log_error
+            log_error("ask_ai异常", str(e), context=final_input[:100])
 
-    # 3️⃣ 存AI回复
-    st.session_state.messages.append({
+    # 3️⃣ 确定消息类型
+    route_label = meta.get("route_label", "")
+    if "计算" in route_label and meta.get("calc_result"):
+        msg_type = "calc"
+        st.session_state.stats["calc"] += 1
+    elif "推荐" in route_label and meta.get("recommendations"):
+        msg_type = "recommend"
+        st.session_state.stats["recommend"] += 1
+    else:
+        msg_type = "qa"
+
+    st.session_state.stats["total"] += 1
+    st.session_state.last_route = route_label
+    st.session_state.last_meta = meta
+
+    # 4️⃣ 准备消息元数据
+    msg_meta = {
         "role": "assistant",
-        "content": answer
-    })
+        "content": answer,
+        "type": msg_type,
+        "route_info": route_label,
+        "calc_meta": meta.get("calc_result"),
+        "rec_meta": meta.get("recommendations"),
+    }
+
+    # 若无检索命中，追加提示
+    if not meta.get("has_hits", True):
+        msg_meta["content"] = (
+            "> 知识库中暂无相关内容，以下回答基于通用机械工程知识生成。\n\n"
+            + answer
+        )
+
+    # 5️⃣ 存AI回复
+    st.session_state.messages.append(msg_meta)
 
     st.rerun()
