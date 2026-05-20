@@ -66,6 +66,11 @@ if "health_report" not in st.session_state:
     st.session_state.health_report = run_health_check()
 if "context_rounds" not in st.session_state:
     st.session_state.context_rounds = 3
+if "session_id" not in st.session_state:
+    import uuid
+    st.session_state["session_id"] = str(uuid.uuid4())[:8]
+if "feedback_given" not in st.session_state:
+    st.session_state["feedback_given"] = set()
 
 
 def get_recent_history(n_rounds: int = 3) -> list[dict]:
@@ -137,6 +142,18 @@ with st.sidebar:
         help="0 = 每次独立问答；数字越大记忆越长，但响应略慢",
     )
     st.session_state["context_rounds"] = n_rounds
+
+    st.markdown("---")
+
+    # ── 反馈统计 ──
+    st.markdown("**📊 反馈统计**")
+    from logger import get_feedback_stats
+    stats = get_feedback_stats()
+    if stats["total"] > 0:
+        st.metric("满意度", f"{stats['satisfaction_rate']:.0f}%")
+        st.caption(f"👍 {stats['positive']}  👎 {stats['negative']}  共 {stats['total']} 条")
+    else:
+        st.caption("暂无反馈数据")
 
     st.markdown("---")
 
@@ -290,6 +307,40 @@ for i, msg in enumerate(st.session_state.messages):
             route_info = msg.get("route_info", "")
             if route_info:
                 st.caption(f"路由: {route_info}")
+
+            # ── 反馈按钮 ──
+            if i not in st.session_state["feedback_given"]:
+                c1, c2, c3 = st.columns([1, 1, 10])
+                with c1:
+                    if st.button("👍", key=f"fb_up_{i}", help="有帮助"):
+                        from logger import save_feedback
+                        user_msg = st.session_state["messages"][i - 1]["content"] if i > 0 else ""
+                        save_feedback(
+                            question=user_msg,
+                            answer=msg["content"],
+                            rating=1,
+                            route=st.session_state.get("last_route", "unknown"),
+                            use_hybrid=True,
+                            session_id=st.session_state["session_id"],
+                        )
+                        st.session_state["feedback_given"].add(i)
+                        st.rerun()
+                with c2:
+                    if st.button("👎", key=f"fb_down_{i}", help="无帮助"):
+                        from logger import save_feedback
+                        user_msg = st.session_state["messages"][i - 1]["content"] if i > 0 else ""
+                        save_feedback(
+                            question=user_msg,
+                            answer=msg["content"],
+                            rating=0,
+                            route=st.session_state.get("last_route", "unknown"),
+                            use_hybrid=True,
+                            session_id=st.session_state["session_id"],
+                        )
+                        st.session_state["feedback_given"].add(i)
+                        st.rerun()
+            else:
+                st.caption("✅ 已记录反馈")
 
 # ======================
 # 用户输入区

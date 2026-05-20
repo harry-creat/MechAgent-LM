@@ -151,6 +151,91 @@ def export_session_report(session_messages: list[dict[str, str]] | None = None) 
     return "\n".join(lines)
 
 
+def save_feedback(
+    question: str,
+    answer: str,
+    rating: int,
+    route: str,
+    use_hybrid: bool,
+    session_id: str,
+) -> None:
+    """保存用户反馈到 logs/feedback.jsonl。
+
+    Args:
+        question: 用户问题
+        answer: AI 回答
+        rating: 1=👍  0=👎
+        route: 路由结果标签
+        use_hybrid: 是否使用了混合检索
+        session_id: 会话 ID
+    """
+    _ensure_log_dir()
+    feedback_path = os.path.join(LOG_DIR, "feedback.jsonl")
+    record = {
+        "timestamp": datetime.now().isoformat(),
+        "session_id": session_id,
+        "question": question,
+        "answer": answer[:500],
+        "rating": rating,
+        "route": route,
+        "use_hybrid": use_hybrid,
+        "answer_length": len(answer),
+    }
+    with open(feedback_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def get_feedback_stats() -> dict[str, Any]:
+    """读取反馈日志并返回统计信息。
+
+    Returns:
+        {"total": int, "positive": int, "negative": int,
+         "satisfaction_rate": float, "by_route": {kb_id: {"pos":int,"neg":int}}}
+    """
+    _ensure_log_dir()
+    feedback_path = os.path.join(LOG_DIR, "feedback.jsonl")
+    if not os.path.isfile(feedback_path):
+        return {"total": 0, "positive": 0, "negative": 0, "satisfaction_rate": 0.0, "by_route": {}}
+
+    total = 0
+    positive = 0
+    negative = 0
+    by_route: dict[str, dict[str, int]] = {}
+
+    with open(feedback_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            total += 1
+            r = rec.get("rating", 0)
+            if r > 0:
+                positive += 1
+            else:
+                negative += 1
+
+            route = rec.get("route", "unknown")
+            if route not in by_route:
+                by_route[route] = {"pos": 0, "neg": 0}
+            if r > 0:
+                by_route[route]["pos"] += 1
+            else:
+                by_route[route]["neg"] += 1
+
+    rate = (positive / total * 100) if total > 0 else 0.0
+    return {
+        "total": total,
+        "positive": positive,
+        "negative": negative,
+        "satisfaction_rate": round(rate, 1),
+        "by_route": by_route,
+    }
+
+
 def log_error(error_type: str, message: str, context: str = "") -> None:
     """记录错误到 logs/error.log。
 
