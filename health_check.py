@@ -109,21 +109,32 @@ def _check_api_key() -> CheckItem:
 
 
 def _check_embedding_model() -> CheckItem:
+    """仅检查 sentence-transformers 包是否可用，不触发模型下载。
+
+    模型下载延迟到首次实际使用时（延迟加载），避免 Streamlit Cloud
+    启动阶段因 HuggingFace 网络超时导致 app 崩溃。
+    """
     try:
-        from embedding_model import get_embedding_dimension, get_model
-        m = get_model()
-        dim = get_embedding_dimension()
+        import sentence_transformers
+        from embedding_model import MODEL_NAME
         return CheckItem(
             name="Embedding 模型",
             ok=True,
-            detail=f"已加载，维度={dim}",
+            detail=f"包可用，模型将在首次使用时加载（{MODEL_NAME}）",
             icon="✅",
+        )
+    except ImportError:
+        return CheckItem(
+            name="Embedding 模型",
+            ok=False,
+            detail="sentence-transformers 未安装",
+            icon="❌",
         )
     except Exception as e:
         return CheckItem(
             name="Embedding 模型",
             ok=False,
-            detail=f"加载失败: {e}",
+            detail=f"配置异常: {e}",
             icon="❌",
         )
 

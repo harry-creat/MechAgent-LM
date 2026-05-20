@@ -39,14 +39,25 @@ class SemanticHit:
 
 
 class FAISSKnowledgeIndex:
-    """一个知识库对应一个 FAISS IndexFlatL2 + 平行元数据列表。"""
+    """一个知识库对应一个 FAISS IndexFlatL2 + 平行元数据列表。
+
+    索引创建延迟到首次 add 或 search 时，避免启动阶段加载 embedding 模型。
+    """
 
     def __init__(self, kb_id: str, persist_dir: str = "./faiss_db"):
         self.kb_id = kb_id
         self.persist_dir = persist_dir
-        self.dim = get_embedding_dimension()
-        self._index = faiss.IndexFlatL2(self.dim)
+        self._index = None      # 延迟创建
+        self.dim = None         # 加载已有索引或首次使用时确定
         self._metas: list[dict[str, Any]] = []
+
+    def _ensure_index(self) -> None:
+        """延迟初始化 FAISS 索引，首次调用时加载 embedding 模型获取维度。"""
+        if self._index is not None:
+            return
+        if self.dim is None:
+            self.dim = get_embedding_dimension()
+        self._index = faiss.IndexFlatL2(self.dim)
 
     def _paths(self) -> tuple[str, str]:
         base = os.path.join(self.persist_dir, self.kb_id)
@@ -59,6 +70,7 @@ class FAISSKnowledgeIndex:
         """
         if not records:
             return 0
+        self._ensure_index()
         texts = [r["text"] for r in records]
         base_metas = [dict(r.get("metadata") or {}) for r in records]
         vectors = np.asarray(embed_texts(texts), dtype=np.float32)
@@ -75,7 +87,7 @@ class FAISSKnowledgeIndex:
         return len(rows)
 
     def search(self, query: str, top_k: int = 5) -> list[SemanticHit]:
-        if self._index.ntotal == 0:
+        if self._index is None or self._index.ntotal == 0:
             return []
         q = np.asarray(embed_texts([query]), dtype=np.float32)
         q = _l2_normalize(q)
@@ -91,6 +103,8 @@ class FAISSKnowledgeIndex:
         return hits
 
     def save(self) -> None:
+        if self._index is None:
+            return
         os.makedirs(self.persist_dir, exist_ok=True)
         idx_path, meta_path = self._paths()
         faiss.write_index(self._index, idx_path)
@@ -108,11 +122,13 @@ class FAISSKnowledgeIndex:
                 self._metas = json.load(f)
         except (json.JSONDecodeError, OSError, RuntimeError) as e:
             print(f"[{self.kb_id}] 索引文件损坏，跳过加载: {e}")
-            self._index = faiss.IndexFlatL2(self.dim)
+            self._index = None
             self._metas = []
             return False
         return True
 
     @property
     def count(self) -> int:
+        if self._index is None:
+            return 0
         return int(self._index.ntotal)
