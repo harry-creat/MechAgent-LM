@@ -1,0 +1,16 @@
+{
+  "faiss": {
+    "mode": "纯FAISS",
+    "faithfulness": 0.362,
+    "answer_relevancy": 0.852,
+    "context_recall": 0.364,
+    "average": 0.526
+  },
+  "hybrid": {
+    "mode": "混合检索",
+    "faithfulness": 0.362,
+    "answer_relevancy": 0.846,
+    "context_recall": 0.358,
+    "average": 0.522
+  }
+}
